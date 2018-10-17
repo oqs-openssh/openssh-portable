@@ -1,4 +1,4 @@
-/* $OpenBSD: readconf.c,v 1.283 2018/02/23 15:58:37 markus Exp $ */
+/* $OpenBSD: readconf.c,v 1.291 2018/06/10 23:45:41 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -161,7 +161,7 @@ typedef enum {
 	oEnableSSHKeysign, oRekeyLimit, oVerifyHostKeyDNS, oConnectTimeout,
 	oAddressFamily, oGssAuthentication, oGssDelegateCreds,
 	oServerAliveInterval, oServerAliveCountMax, oIdentitiesOnly,
-	oSendEnv, oControlPath, oControlMaster, oControlPersist,
+	oSendEnv, oSetEnv, oControlPath, oControlMaster, oControlPersist,
 	oHashKnownHosts,
 	oTunnel, oTunnelDevice,
 	oLocalCommand, oPermitLocalCommand, oRemoteCommand,
@@ -277,6 +277,7 @@ static struct {
 	{ "serveraliveinterval", oServerAliveInterval },
 	{ "serveralivecountmax", oServerAliveCountMax },
 	{ "sendenv", oSendEnv },
+	{ "setenv", oSetEnv },
 	{ "controlpath", oControlPath },
 	{ "controlmaster", oControlMaster },
 	{ "controlpersist", oControlPersist },
@@ -551,6 +552,7 @@ match_cfg_line(Options *options, char **condition, struct passwd *pw,
 	const char *ruser;
 	int r, port, this_result, result = 1, attributes = 0, negate;
 	char thishost[NI_MAXHOST], shorthost[NI_MAXHOST], portstr[NI_MAXSERV];
+	char uidstr[32];
 
 	/*
 	 * Configuration is likely to be incomplete at this point so we
@@ -631,6 +633,8 @@ match_cfg_line(Options *options, char **condition, struct passwd *pw,
 			strlcpy(shorthost, thishost, sizeof(shorthost));
 			shorthost[strcspn(thishost, ".")] = '\0';
 			snprintf(portstr, sizeof(portstr), "%d", port);
+			snprintf(uidstr, sizeof(uidstr), "%llu",
+			    (unsigned long long)pw->pw_uid);
 
 			cmd = percent_expand(arg,
 			    "L", shorthost,
@@ -641,6 +645,7 @@ match_cfg_line(Options *options, char **condition, struct passwd *pw,
 			    "p", portstr,
 			    "r", ruser,
 			    "u", pw->pw_name,
+			    "i", uidstr,
 			    (char *)NULL);
 			if (result != 1) {
 				/* skip execution if prior predicate failed */
@@ -682,6 +687,35 @@ match_cfg_line(Options *options, char **condition, struct passwd *pw,
 	*condition = cp;
 	free(host);
 	return result;
+}
+
+/* Remove environment variable by pattern */
+static void
+rm_env(Options *options, const char *arg, const char *filename, int linenum)
+{
+	int i, j;
+	char *cp;
+
+	/* Remove an environment variable */
+	for (i = 0; i < options->num_send_env; ) {
+		cp = xstrdup(options->send_env[i]);
+		if (!match_pattern(cp, arg + 1)) {
+			free(cp);
+			i++;
+			continue;
+		}
+		debug3("%s line %d: removing environment %s",
+		    filename, linenum, cp);
+		free(cp);
+		free(options->send_env[i]);
+		options->send_env[i] = NULL;
+		for (j = i; j < options->num_send_env - 1; j++) {
+			options->send_env[j] = options->send_env[j + 1];
+			options->send_env[j + 1] = NULL;
+		}
+		options->num_send_env--;
+		/* NB. don't increment i */
+	}
 }
 
 /*
@@ -1359,11 +1393,41 @@ parse_keytypes:
 				    filename, linenum);
 			if (!*activep)
 				continue;
-			if (options->num_send_env >= MAX_SEND_ENV)
-				fatal("%s line %d: too many send env.",
+			if (*arg == '-') {
+				/* Removing an env var */
+				rm_env(options, arg, filename, linenum);
+				continue;
+			} else {
+				/* Adding an env var */
+				if (options->num_send_env >= INT_MAX)
+					fatal("%s line %d: too many send env.",
+					    filename, linenum);
+				options->send_env = xrecallocarray(
+				    options->send_env, options->num_send_env,
+				    options->num_send_env + 1,
+				    sizeof(*options->send_env));
+				options->send_env[options->num_send_env++] =
+				    xstrdup(arg);
+			}
+		}
+		break;
+
+	case oSetEnv:
+		value = options->num_setenv;
+		while ((arg = strdelimw(&s)) != NULL && *arg != '\0') {
+			if (strchr(arg, '=') == NULL)
+				fatal("%s line %d: Invalid SetEnv.",
 				    filename, linenum);
-			options->send_env[options->num_send_env++] =
-			    xstrdup(arg);
+			if (!*activep || value != 0)
+				continue;
+			/* Adding a setenv var */
+			if (options->num_setenv >= INT_MAX)
+				fatal("%s line %d: too many SetEnv.",
+				    filename, linenum);
+			options->setenv = xrecallocarray(
+			    options->setenv, options->num_setenv,
+			    options->num_setenv + 1, sizeof(*options->setenv));
+			options->setenv[options->num_setenv++] = xstrdup(arg);
 		}
 		break;
 
@@ -1688,7 +1752,8 @@ read_config_file_depth(const char *filename, struct passwd *pw,
     int flags, int *activep, int depth)
 {
 	FILE *f;
-	char line[4096];
+	char *line = NULL;
+	size_t linesize = 0;
 	int linenum;
 	int bad_options = 0;
 
@@ -1715,15 +1780,14 @@ read_config_file_depth(const char *filename, struct passwd *pw,
 	 * on/off by Host specifications.
 	 */
 	linenum = 0;
-	while (fgets(line, sizeof(line), f)) {
+	while (getline(&line, &linesize, f) != -1) {
 		/* Update line number counter. */
 		linenum++;
-		if (strlen(line) == sizeof(line) - 1)
-			fatal("%s line %d too long", filename, linenum);
 		if (process_config_line_depth(options, pw, host, original_host,
 		    line, filename, linenum, activep, flags, depth) != 0)
 			bad_options++;
 	}
+	free(line);
 	fclose(f);
 	if (bad_options > 0)
 		fatal("%s: terminating, %d bad configuration options",
@@ -1815,7 +1879,10 @@ initialize_options(Options * options)
 	options->verify_host_key_dns = -1;
 	options->server_alive_interval = -1;
 	options->server_alive_count_max = -1;
+	options->send_env = NULL;
 	options->num_send_env = 0;
+	options->setenv = NULL;
+	options->num_setenv = 0;
 	options->control_path = NULL;
 	options->control_master = -1;
 	options->control_persist = -1;
@@ -1998,9 +2065,9 @@ fill_default_options(Options * options)
 	if (options->visual_host_key == -1)
 		options->visual_host_key = 0;
 	if (options->ip_qos_interactive == -1)
-		options->ip_qos_interactive = IPTOS_LOWDELAY;
+		options->ip_qos_interactive = IPTOS_DSCP_AF21;
 	if (options->ip_qos_bulk == -1)
-		options->ip_qos_bulk = IPTOS_THROUGHPUT;
+		options->ip_qos_bulk = IPTOS_DSCP_CS1;
 	if (options->request_tty == -1)
 		options->request_tty = REQUEST_TTY_AUTO;
 	if (options->proxy_use_fdpass == -1)
@@ -2036,6 +2103,12 @@ fill_default_options(Options * options)
 	CLEAR_ON_NONE(options->proxy_command);
 	CLEAR_ON_NONE(options->control_path);
 	CLEAR_ON_NONE(options->revoked_host_keys);
+	if (options->jump_host != NULL &&
+	    strcmp(options->jump_host, "none") == 0 &&
+	    options->jump_port == 0 && options->jump_user == NULL) {
+		free(options->jump_host);
+		options->jump_host = NULL;
+	}
 	/* options->identity_agent distinguishes NULL from 'none' */
 	/* options->user will be set in the main program if appropriate */
 	/* options->hostname will be set in the main program if appropriate */
@@ -2264,6 +2337,8 @@ parse_jump(const char *s, Options *o, int active)
 	orig = sdup = xstrdup(s);
 	first = active;
 	do {
+		if (strcasecmp(s, "none") == 0)
+			break;
 		if ((cp = strrchr(sdup, ',')) == NULL)
 			cp = sdup; /* last */
 		else
@@ -2284,14 +2359,19 @@ parse_jump(const char *s, Options *o, int active)
 	} while (cp != sdup);
 	/* success */
 	if (active) {
-		o->jump_user = user;
-		o->jump_host = host;
-		o->jump_port = port;
-		o->proxy_command = xstrdup("none");
-		user = host = NULL;
-		if ((cp = strrchr(s, ',')) != NULL && cp != s) {
-			o->jump_extra = xstrdup(s);
-			o->jump_extra[cp - s] = '\0';
+		if (strcasecmp(s, "none") == 0) {
+			o->jump_host = xstrdup("none");
+			o->jump_port = 0;
+		} else {
+			o->jump_user = user;
+			o->jump_host = host;
+			o->jump_port = port;
+			o->proxy_command = xstrdup("none");
+			user = host = NULL;
+			if ((cp = strrchr(s, ',')) != NULL && cp != s) {
+				o->jump_extra = xstrdup(s);
+				o->jump_extra[cp - s] = '\0';
+			}
 		}
 	}
 	ret = 0;
@@ -2348,6 +2428,8 @@ fmt_intarg(OpCodes code, int val)
 		return fmt_multistate_int(val, multistate_requesttty);
 	case oCanonicalizeHostname:
 		return fmt_multistate_int(val, multistate_canonicalizehostname);
+	case oAddKeysToAgent:
+		return fmt_multistate_int(val, multistate_yesnoaskconfirm);
 	case oFingerprintHash:
 		return ssh_digest_alg_name(val);
 	default:
@@ -2467,6 +2549,7 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_int(oPort, o->port);
 
 	/* Flag options */
+	dump_cfg_fmtint(oAddKeysToAgent, o->add_keys_to_agent);
 	dump_cfg_fmtint(oAddressFamily, o->address_family);
 	dump_cfg_fmtint(oBatchMode, o->batch_mode);
 	dump_cfg_fmtint(oCanonicalizeFallbackLocal, o->canonicalize_fallback_local);
@@ -2523,6 +2606,7 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_string(oHostKeyAlias, o->host_key_alias);
 	dump_cfg_string(oHostbasedKeyTypes, o->hostbased_key_types);
 	dump_cfg_string(oIdentityAgent, o->identity_agent);
+	dump_cfg_string(oIgnoreUnknown, o->ignored_unknown);
 	dump_cfg_string(oKbdInteractiveDevices, o->kbd_interactive_devices);
 	dump_cfg_string(oKexAlgorithms, o->kex_algorithms ? o->kex_algorithms : KEX_CLIENT_KEX);
 	dump_cfg_string(oLocalCommand, o->local_command);
@@ -2545,9 +2629,11 @@ dump_client_config(Options *o, const char *host)
 	/* String array options */
 	dump_cfg_strarray(oIdentityFile, o->num_identity_files, o->identity_files);
 	dump_cfg_strarray_oneline(oCanonicalDomains, o->num_canonical_domains, o->canonical_domains);
+	dump_cfg_strarray(oCertificateFile, o->num_certificate_files, o->certificate_files);
 	dump_cfg_strarray_oneline(oGlobalKnownHostsFile, o->num_system_hostfiles, o->system_hostfiles);
 	dump_cfg_strarray_oneline(oUserKnownHostsFile, o->num_user_hostfiles, o->user_hostfiles);
 	dump_cfg_strarray(oSendEnv, o->num_send_env, o->send_env);
+	dump_cfg_strarray(oSetEnv, o->num_setenv, o->setenv);
 
 	/* Special cases */
 
@@ -2604,6 +2690,9 @@ dump_client_config(Options *o, const char *host)
 	/* oStreamLocalBindMask */
 	printf("streamlocalbindmask 0%o\n",
 	    o->fwd_opts.streamlocal_bind_mask);
+
+	/* oLogFacility */
+	printf("syslogfacility %s\n", log_facility_name(o->log_facility));
 
 	/* oProxyCommand / oProxyJump */
 	if (o->jump_host == NULL)

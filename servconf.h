@@ -1,4 +1,4 @@
-/* $OpenBSD: servconf.h,v 1.130 2017/10/25 00:19:47 djm Exp $ */
+/* $OpenBSD: servconf.h,v 1.134 2018/06/09 03:03:10 djm Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -31,12 +31,6 @@
 #define PRIVSEP_OFF		0
 #define PRIVSEP_ON		1
 #define PRIVSEP_NOSANDBOX	2
-
-/* AllowTCPForwarding */
-#define FORWARD_DENY		0
-#define FORWARD_REMOTE		(1)
-#define FORWARD_LOCAL		(1<<1)
-#define FORWARD_ALLOW		(FORWARD_REMOTE|FORWARD_LOCAL)
 
 /* PermitOpen */
 #define PERMITOPEN_ANY		0
@@ -160,6 +154,8 @@ typedef struct {
 
 	u_int num_accept_env;
 	char   **accept_env;
+	u_int num_setenv;
+	char   **setenv;
 
 	int	max_startups_begin;
 	int	max_startups_rate;
@@ -187,8 +183,10 @@ typedef struct {
 
 	int	permit_tun;
 
-	char   **permitted_opens;
-	u_int   num_permitted_opens; /* May also be one of PERMITOPEN_* */
+	char   **permitted_opens;	/* May also be one of PERMITOPEN_* */
+	u_int   num_permitted_opens;
+	char   **permitted_listens; /* May also be one of PERMITOPEN_* */
+	u_int   num_permitted_listens;
 
 	char   *chroot_directory;
 	char   *revoked_keys_file;
@@ -209,6 +207,7 @@ typedef struct {
 
 	int	fingerprint_hash;
 	int	expose_userauth_info;
+	u_int64_t timing_secret;
 }       ServerOptions;
 
 /* Information about the incoming connection as used by Match */
@@ -251,6 +250,7 @@ struct connection_info {
 		M_CP_STRARRAYOPT(accept_env, num_accept_env); \
 		M_CP_STRARRAYOPT(auth_methods, num_auth_methods); \
 		M_CP_STRARRAYOPT(permitted_opens, num_permitted_opens); \
+		M_CP_STRARRAYOPT(permitted_listens, num_permitted_listens); \
 	} while (0)
 
 struct connection_info *get_connection_info(int, int);

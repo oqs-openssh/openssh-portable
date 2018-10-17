@@ -1,4 +1,4 @@
-/* $OpenBSD: clientloop.c,v 1.311 2018/02/11 21:16:56 dtucker Exp $ */
+/* $OpenBSD: clientloop.c,v 1.314 2018/06/26 02:02:36 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -664,7 +664,7 @@ client_status_confirm(struct ssh *ssh, int type, Channel *c, void *ctx)
 	    options.request_tty == REQUEST_TTY_YES))
 		cr->action = CONFIRM_CLOSE;
 
-	/* XXX supress on mux _client_ quietmode */
+	/* XXX suppress on mux _client_ quietmode */
 	tochan = options.log_level >= SYSLOG_LEVEL_ERROR &&
 	    c->ctl_chan != -1 && c->extended_usage == CHAN_EXTENDED_WRITE;
 
@@ -921,7 +921,7 @@ print_escape_help(Buffer *b, int escape_char, int mux_client, int using_stderr)
 	buffer_append(b, string, strlen(string));
 }
 
-/* 
+/*
  * Process the characters one by one.
  */
 static int
@@ -940,7 +940,7 @@ process_escapes(struct ssh *ssh, Channel *c,
 
 	if (c->filter_ctx == NULL)
 		return 0;
-	
+
 	if (len <= 0)
 		return (0);
 
@@ -1746,7 +1746,7 @@ struct hostkeys_update_ctx {
 	 */
 	struct sshkey **keys;
 	int *keys_seen;
-	size_t nkeys, nnew; 
+	size_t nkeys, nnew;
 
 	/*
 	 * Keys that are in known_hosts, but were not present in the update
@@ -2158,7 +2158,8 @@ void
 client_session2_setup(struct ssh *ssh, int id, int want_tty, int want_subsystem,
     const char *term, struct termios *tiop, int in_fd, Buffer *cmd, char **env)
 {
-	int len;
+	int i, j, matched, len;
+	char *name, *val;
 	Channel *c = NULL;
 
 	debug2("%s: id %d", __func__, id);
@@ -2193,9 +2194,6 @@ client_session2_setup(struct ssh *ssh, int id, int want_tty, int want_subsystem,
 
 	/* Transfer any environment variables from client to server */
 	if (options.num_send_env != 0 && env != NULL) {
-		int i, j, matched;
-		char *name, *val;
-
 		debug("Sending environment.");
 		for (i = 0; env[i] != NULL; i++) {
 			/* Split */
@@ -2226,6 +2224,22 @@ client_session2_setup(struct ssh *ssh, int id, int want_tty, int want_subsystem,
 			packet_send();
 			free(name);
 		}
+	}
+	for (i = 0; i < options.num_setenv; i++) {
+		/* Split */
+		name = xstrdup(options.setenv[i]);
+		if ((val = strchr(name, '=')) == NULL) {
+			free(name);
+			continue;
+		}
+		*val++ = '\0';
+
+		debug("Setting env %s = %s", name, val);
+		channel_request_start(ssh, id, "env", 0);
+		packet_put_cstring(name);
+		packet_put_cstring(val);
+		packet_send();
+		free(name);
 	}
 
 	len = buffer_len(cmd);

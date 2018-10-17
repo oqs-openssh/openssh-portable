@@ -1,4 +1,4 @@
-# uncomment if you run a non bourne compatable shell. Ie. csh
+# uncomment if you run a non bourne compatible shell. Ie. csh
 #SHELL = @SH@
 
 AUTORECONF=autoreconf
@@ -580,8 +580,6 @@ regress-binaries: regress/modpipe$(EXEEXT) \
 	regress/unittests/utf8/test_utf8$(EXEEXT) \
 	regress/misc/kexfuzz/kexfuzz$(EXEEXT)
 
-REGRESSTMP = "$(PWD)/regress"
-
 tests interop-tests t-exec unit: regress-prep regress-binaries $(TARGETS)
 	BUILDDIR=`pwd`; \
 	TEST_SSH_SCP="$${BUILDDIR}/scp"; \
@@ -605,7 +603,7 @@ tests interop-tests t-exec unit: regress-prep regress-binaries $(TARGETS)
 		.OBJDIR="$${BUILDDIR}/regress" \
 		.CURDIR="`pwd`" \
 		BUILDDIR="$${BUILDDIR}" \
-		OBJ="$(REGRESSTMP)" \
+		OBJ="$${BUILDDIR}/regress/" \
 		PATH="$${BUILDDIR}:$${PATH}" \
 		TEST_ENV=MALLOC_OPTIONS="@TEST_MALLOC_OPTIONS@" \
 		TEST_MALLOC_OPTIONS="@TEST_MALLOC_OPTIONS@" \
